@@ -24,6 +24,9 @@
 #define ARDUINOJSON_USE_LONG_LONG 1
 #define SOPHY
 #include "ArduinoJson.h"
+#if ARDUINOJSON_USE_LONG_LONG == 0 && !PLATFORMIO
+#error "Using Arduino IDE is not recommended, please follow this guide https://github.com/G4lile0/tinyGS/wiki/Arduino-IDE or edit /ArduinoJson/src/ArduinoJson/Configuration.hpp and amend to #define ARDUINOJSON_USE_LONG_LONG 1 around line 68"
+#endif
 
 ConfigManager::ConfigManager()
 : IotWebConf2(thingName, &dnsServer, &server, initialApPassword, configVersion)
@@ -53,6 +56,7 @@ ConfigManager::ConfigManager()
   server.on(ROOT_URL, [this]{ handleRoot(); });
   server.on(CONFIG_URL, [this]{ handleConfig(); });
   server.on(DASHBOARD_URL, [this]{ handleDashboard(); });
+  server.on(BOARDSTATUS_URL, [this]{ handleDashboard(); });
   server.on(RESTART_URL, [this]{ handleRestart(); });
   server.on(REFRESH_CONSOLE_URL, [this]{ handleRefreshConsole(); });
   setupUpdateServer(
@@ -118,6 +122,7 @@ void ConfigManager::handleRoot()
   s += FPSTR(IOTWEBCONF_HTML_BODY_INNER);
   s += String(FPSTR(LOGO)) + "<br />";
   s += "<button onclick=\"window.location.href='" + String(DASHBOARD_URL) + "';\">Station dashboard</button><br /><br />";
+  s += "<button onclick=\"window.location.href='" + String(BOARDSTATUS_URL) + "';\">Board (ESP) Status</button><br /><br />";
   s += "<button onclick=\"window.location.href='" + String(CONFIG_URL) + "';\">Configure parameters</button><br /><br />";
   s += "<button onclick=\"window.location.href='" + String(UPDATE_URL) + "';\">Upload new version</button><br /><br />";
   s += "<button onclick=\"window.location.href='" + String(RESTART_URL) + "';\">Restart Station</button><br /><br />";
@@ -144,6 +149,28 @@ void ConfigManager::handleDashboard()
 
   // uint64_t time = millis(); // TODO: add current time
   String s = String(FPSTR(IOTWEBCONF_HTML_HEAD));
+
+  // default value for Ethernet / MQTT 
+  String str_discon = String(FPSTR("NOT CONNECTED"));
+
+/* DonC 
+  #ifdef SOPHY
+  
+  // String(getTestMode()?"ENABLED":"DISABLED")
+
+    // convert char* to str for if 
+    String str_getMqttServer_Sophy;
+    std::string str_getMqttServer_Sophy(getMqttServer_Sophy());
+
+    if  (str_getMqttServer_Sophy == "192.168.0.17") // "localhost")
+    {
+      str_discon =  String(FPSTR("NOT CONNECTED"));
+    }else{
+      str_discon = "DISABLED";
+    }
+  #endif 
+*/
+
   s += "<style>" + String(FPSTR(IOTWEBCONF_HTML_STYLE_INNER)) + "</style>";
   s += "<style>" + String(FPSTR(IOTWEBCONF_DASHBOARD_STYLE_INNER)) + "</style>";
   s += "<script>" + String(FPSTR(IOTWEBCONF_CONSOLE_SCRIPT)) + "</script>";
@@ -153,9 +180,9 @@ void ConfigManager::handleDashboard()
   s += F("</table></div><div class=\"card\"><h3>Groundstation Status</h3><table>");
   s += "<tr><td>Name </td><td>" + String(getThingName()) + "</td></tr>";
   s += "<tr><td>Version </td><td>" + String(status.version) + "</td></tr>";
-  s += "<tr><td>WiFi </td><td>" + String(WiFi.isConnected()?"<span class='G'>CONNECTED</span>":"<span class='R'>NOT CONNECTED</span>") + "</td></tr>";
   s += "<tr><td>MQTT Server </td><td>" + String(status.mqtt_connected?"<span class='G'>CONNECTED</span>":"<span class='R'>NOT CONNECTED</span>") + "</td></tr>";
-  s += "<tr><td>MQTT Server local</td><td>" + String(status_sophy.mqtt_connected?"<span class='G'>CONNECTED</span>":"<span class='R'>NOT CONNECTED</span>") + "</td></tr>";
+  s += "<tr><td>MQTT Server local</td><td>" + String(status_sophy.mqtt_connected?"<span class='G'>CONNECTED</span>":"<span class='R'>"+str_discon+"</span>") + "</td></tr>";
+  //s += "<tr><td>MQTT Server local</td><td>" + String(status_sophy.mqtt_connected?"<span class='G'>CONNECTED</span>":"<span class='R'>NOT CONNECTED</span>") + "</td></tr>";
   s += "<tr><td>Radio </td><td>" + String(Radio::getInstance().isReady()?"<span class='G'>READY</span>":"<span class='R'>NOT READY</span>") + "</td></tr>";
   s += "<tr><td>Test Mode </td><td>" + String(getTestMode()?"ENABLED":"DISABLED") + "</td></tr>";
   //s += "<tr><td>Uptime </td><td>" + // process and update in js + "</td></tr>";
@@ -358,8 +385,8 @@ void ConfigManager::resetAllConfig()
   mqttUserParam.valueBuffer[0] = '\0';
   mqttPassParam.valueBuffer[0] = '\0';
   #ifdef SOPHY
-  strncpy(mqttPortParam_sophy.valueBuffer, MQTT_DEFAULT_PORT, MQTT_PORT_LENGTH);
-  strncpy(mqttServerParam_sophy.valueBuffer, MQTT_DEFAULT_SERVER, MQTT_SERVER_LENGTH);
+  strncpy(mqttPortParam_sophy.valueBuffer, MQTT_SOPHY_PORT, MQTT_PORT_LENGTH);
+  strncpy(mqttServerParam_sophy.valueBuffer, MQTT_SOPHY_SERVER, MQTT_SERVER_LENGTH);
   mqttUserParam_sophy.valueBuffer[0] = '\0';
   mqttPassParam_sophy.valueBuffer[0] = '\0';
   #endif 
@@ -371,6 +398,9 @@ void ConfigManager::resetAllConfig()
   telemetry3rd[0]  = '\0';
   testMode[0]  = '\0';
   autoUpdate[0]  = '\0';
+  boardTemplate[0]  = '\0';
+  modemStartup[0]  = '\0';
+  advancedConfig[0]  = '\0';
 
   saveConfig();
 }
@@ -469,6 +499,8 @@ void ConfigManager::configSavedCallback()
     ESP.restart();
   }
 
+  forceApMode(false);
+
   parseAdvancedConf();
   MQTT_Client::getInstance().scheduleRestart();
   
@@ -498,5 +530,10 @@ void ConfigManager::parseAdvancedConf()
   if (doc.containsKey(F("dnOled")))
   {
     advancedConf.dnOled = doc["dnOled"];
+  }
+
+  if (doc.containsKey(F("lowPower")))
+  {
+    advancedConf.lowPower = doc["lowPower"];
   }
 }
