@@ -79,13 +79,81 @@
 #include "src/OTA/OTA.h"
 #include <ESPNtpClient.h>
 #include "src/Logger/Logger.h"
+#include <ArduinoP13.h>  // Satellite tracking
+#define MAP_MAXX   128
+#define MAP_MAXY    64
 
+/* Setup a satellite to track */
+// const char *tleName = "FEES (AL OBJ)";
+// const char *tlel1   = "1 48082U 21022AL  21114.15389910  .00002956  00000-0  20395-3 0  9998";
+// const char *tlel2   = "2 48082  97.5625  17.4313 0017331 124.4755  12.9113 15.06444099  3406";
+
+const char *tleName = "FEES";
+const char *tlel1   = "1 48082U 21022AL  21144.56510677  .00001413  00000-0  99473-4 0  9993";
+const char *tlel2   = "2 48082  97.5590  47.2794 0017276  28.6038  55.9884 15.06536559  7980";
+
+// const char *tleName = "OBJECT AL";
+// const char *tlel1   = "1 48082U 21022AL  21144.56510677  .00001413  00000-0  99473-4 0  9993";
+// const char *tlel2   = "2 48082  97.5590  47.2794 0017276  28.6038  55.9884 15.06536559  7980";
+
+// International Space Station
+// const char *tleName = "ISS (ZARYA)";
+// const char *tlel1   = "1 25544U 98067A   19132.94086806  .00001341  00000-0  28838-4 0  9999";
+// const char *tlel2   = "2 25544  51.6422 176.3402 0001360 345.7469  23.7758 15.52660993169782";
+
+// For testing purpose (geostationary, no motion)
+//const char *tleName = "ES'HAIL 2";
+//const char *tlel1   = "1 43700U 18090A   19132.49026609  .00000132  00000-0  00000-0 0  9990";
+//const char *tlel2   = "2 43700   0.0182 271.8232 0001691 166.1779 354.2495  1.00270105  1678";
+
+
+const char  *pcMyName = "IU2IOL";    // Observer name
+double       dMyLAT   =  45.3043;    // Latitude (Breitengrad): N -> +, S -> -
+double       dMyLON   =   9.5050;    // Longitude (Längengrad): E -> +, W -> -
+double       dMyALT   =      0.0;    // Altitude ASL (m)
+// double       dMyALT   =    386.0;    // Altitude ASL (m)
+
+double       dfreqRX  = 145.800;     // Nominal downlink frequency
+double       dfreqTX  = 437.800;     // Nominal uplink frequency
+
+int          iYear    = 2021;        // Set start year
+int          iMonth   = 5;           // Set start month
+int          iDay     = 05;          // Set start day
+int          iHour    = 21;          // Set start hour
+int          iMinute  = 1;           // Set start minute
+int          iSecond  = 41;          // Set start second
+
+double       dSatLAT  = 0;           // Satellite latitude
+double       dSatLON  = 0;           // Satellite longitude
+double       dSatAZ   = 0;           // Satellite azimuth
+double       dSatEL   = 0;           // Satellite elevation
+
+double       dSunLAT  = 0;           // Sun latitude
+double       dSunLON  = 0;           // Sun longitude
+double       dSunAZ   = 0;           // Sun azimuth
+double       dSunEL   = 0;           // Sun elevation
+
+int          ixQTH    = 0;           // Map pixel coordinate x of QTH
+int          iyQTH    = 0;           // Map pixel coordinate y of QTH
+int          ixSAT    = 0;           // Map pixel coordinate x of satellite
+int          iySAT    = 0;           // Map pixel coordinate y of satellite
+int          ixSUN    = 0;           // Map pixel coordinate x of sun
+int          iySUN    = 0;           // Map pixel coordinate y of sun
+
+char         acBuffer[20];            // Buffer for ASCII time
+
+int          aiSatFP[32][2];          // Array for storing the satellite footprint map coordinates
+int          aiSunFP[32][2];          // Array for storing the sunlight footprint map coordinates
+
+/* End Arduino P13*/
 #if  RADIOLIB_VERSION_MAJOR != (0x04) || RADIOLIB_VERSION_MINOR != (0x02) || RADIOLIB_VERSION_PATCH != (0x01) || RADIOLIB_VERSION_EXTRA != (0x00)
 #error "You are not using the correct version of RadioLib please copy TinyGS/lib/RadioLib on Arduino/libraries"
 #endif
 
-#if RADIOLIB_GODMODE == 0 && !PLATFORMIO
+#ifndef RADIOLIB_GODMODE
+#if !PLATFORMIO
 #error "Using Arduino IDE is not recommended, please follow this guide https://github.com/G4lile0/tinyGS/wiki/Arduino-IDE or edit /RadioLib/src/BuildOpt.h and uncomment #define RADIOLIB_GODMODE around line 367" 
+#endif
 #endif
 
 ConfigManager& configManager = ConfigManager::getInstance();
@@ -132,6 +200,7 @@ void wifiConnected()
   configManager.setWifiConnectionCallback(NULL);
   setupNTP();
   displayShowConnected();
+  arduino_ota_setup();
   configManager.delay(100); // finish animation
 
   if (configManager.getLowPower())
@@ -142,6 +211,71 @@ void wifiConnected()
 
   configManager.delay(400); // wait to show the connected screen and stabilize frequency
   //radio.init();
+}
+
+void check_azel(double check_time, bool logOut=false)
+{
+  static double last_check;
+  if (millis() - last_check > check_time) {
+    last_check = millis();
+    time_t currenttime = time (NULL);
+    if (currenttime < 0) {
+        Log::error (PSTR ("Failed to obtain time: %d"), currenttime);
+        return;
+    }
+    struct tm* ti;
+    
+    // ti = localtime (&currenttime);
+    ti = gmtime (&currenttime);
+
+    P13Sun Sun;   // Create object for the sun
+    // Log::console("GMT: %d-%d-%d %d:%d:%d", ti->tm_year, ti->tm_mon, ti->tm_mday, ti->tm_hour, ti->tm_min, ti->tm_sec);
+    P13DateTime MyTime(ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday, ti->tm_hour, ti->tm_min, ti->tm_sec); // Set start time for the prediction, ti->tm_hour-2
+    // P13Observer MyQTH(pcMyName, 45.0, 9.0, 0.0);              // Set observer coordinates
+    // P13Observer MyQTH(pcMyName, dMyLAT, dMyLON, dMyALT);              // Set observer coordinates
+    P13Observer MyQTH(configManager.getThingName(), configManager.getLatitude(), configManager.getLongitude(), dMyALT);              // Set observer coordinates
+
+    P13Satellite MySAT(tleName, tlel1, tlel2);                        // Create satellite definition from TLE
+    
+  //  latlon2xy(ixQTH, iyQTH, dMyLAT, dMyLON, 128, 64);      // Get x/y for the pixel map 128x64 EPS32 Display dimension1 
+    latlon2xy(ixQTH, iyQTH, configManager.getLatitude(), configManager.getLongitude(), 128, 64);      // Get x/y for the pixel map 128x64 EPS32 Display dimension1 
+    
+    MyTime.ascii(acBuffer);             // Get time for prediction as ASCII string
+    MySAT.predict(MyTime);              // Predict satellite for specific time
+    MySAT.latlon(dSatLAT, dSatLON);     // Get the rectangular coordinates
+    MySAT.elaz(MyQTH, dSatEL, dSatAZ);  // Get azimuth and elevation for MyQTH
+    latlon2xy(ixSAT, iySAT, dSatLAT, dSatLON, 128, 64);  // Get x/y for the pixel map
+    status_sophy.satPos[0]=ixSAT;
+    status_sophy.satPos[1]=iySAT;
+    
+  /* 
+    // Calcualte footprint
+    
+    MySAT.footprint(aiSatFP, (sizeof(aiSatFP)/sizeof(int)/2), MAP_MAXX, MAP_MAXY, dSatLAT, dSatLON);
+    
+    for (int iz = 0; iz < (sizeof(aiSatFP)/sizeof(int)/2); iz++)
+    {
+      Log::console("%2d: x = %d, y = %d\r\n", iz, aiSatFP[iz][0], aiSatFP[iz][1]);
+    }
+  */
+
+    if (logOut) {
+    //  Log::console("tv.sec",tv.tv_sec);
+
+      /*  For UNO instead of Serial.printf
+      sprintf(buf, "\r\n\Prediction for %s at %s (MAP %dx%d: x = %d,y = %d):\r\n\r\n", MySAT.name, MyQTH.name, MAP_MAXX, MAP_MAXY, ixQTH, iyQTH);
+      Serial.print(buf);
+      */
+
+      Log::console("%s - Prediction for %s from %s (Lat=%.4f Lon=%.4f, MAP %dx%d: x=%d,y=%d):\r\n Lat=%.4f Lon=%.4f (MAP %dx%d: x=%d,y=%d) Az=%.2f El=%.2f", acBuffer, MySAT.name, MyQTH.name, (MyQTH.LA * RAD_TO_DEG), (MyQTH.LO * RAD_TO_DEG), MAP_MAXX, MAP_MAXY, ixQTH, iyQTH, dSatLAT, dSatLON, MAP_MAXX, MAP_MAXY, ixSAT, iySAT, dSatAZ, dSatEL);
+  //  Log::console("%s -> Lat: %.4f Lon: %.4f (MAP %dx%d: x = %d,y = %d) Az: %.2f El: %.2f\r\n\r\n", acBuffer, dSatLAT, dSatLON, MAP_MAXX, MAP_MAXY, ixSAT, iySAT, dSatAZ, dSatEL);
+
+    //  Log::console("RX: %.6f MHz, TX: %.6f MHz\r\n\r\n", MySAT.doppler(dfreqRX, P13_FRX), MySAT.doppler(dfreqTX, P13_FTX));
+
+    //  Serial.println("Satellite footprint map coordinates:");
+    //  Log::console("Satellite footprint map coordinates:\n\r");
+    }
+  }
 }
 
 void setup()
@@ -156,8 +290,9 @@ void setup()
   configManager.init();
   if (configManager.isFailSafeActive())
   {
+    configManager.setConfiguredCallback(NULL);
+    configManager.setWifiConnectionCallback(NULL);
     Log::console(PSTR("FATAL ERROR: The board is in a boot loop, rescue mode launched. Connect to the WiFi AP: %s, and open a web browser on ip 192.168.4.1 to fix your configuration problem or upload a new firmware."), configManager.getThingName());
-    configManager.forceApMode(true);
     return;
   }
   // make sure to call doLoop at least once before starting to use the configManager
@@ -176,23 +311,38 @@ void setup()
   }
 
   printControls();
+
+
+
 }
 
 void loop() {  
   configManager.doLoop();
   if (configManager.isFailSafeActive())
+  {
+    static bool updateAttepted = false;
+    if (!updateAttepted && configManager.isConnected()) {
+      updateAttepted = true;
+      OTA::update(); // try to update as last resource to recover from this state
+    }
+
+    if (millis() > 10000 || updateAttepted)
+      configManager.forceApMode(true);
+    
     return;
+  }
 
   ArduinoOTA.handle();
   handleSerial();
-  checkButton();
 
   if (configManager.getState() < 2) // not ready or not configured
   {
     displayShowApMode();
     return;
   }
+  
   // configured and no connection
+  checkButton();
   if (radio.isReady())
   {
     status.radio_ready = true;
@@ -209,23 +359,24 @@ void loop() {
   }
 
   // connected
-
+  check_azel(10000);
   mqtt.loop();
   mqtt_sophygs.loop();
   OTA::loop();
   if (configManager.getOledBright() != 0) displayUpdate();
+
 }
 
 void setupNTP()
 {
   NTP.setInterval (120); // Sync each 2 minutes
-  NTP.setTimeZone (configManager.getTZ ()); // Get TX from config manager
+  NTP.setTimeZone (configManager.getTZ()); // Get TX from config manager
   NTP.onNTPSyncEvent (ntp_cb); // Register event callback
   NTP.setMinSyncAccuracy (2000); // Sync accuracy target is 2 ms
   NTP.settimeSyncThreshold (1000); // Sync only if calculated offset absolute value is greater than 1 ms
   NTP.setMaxNumSyncRetry (2); // 2 resync trials if accuracy not reached
   NTP.begin (ntpServer); // Start NTP client
-  Serial.printf ("NTP started");
+  Serial.printf ("NTP starting... ");
   
   time_t startedSync = millis ();
   while (NTP.syncStatus() != syncd && millis() - startedSync < 5000) // Wait 5 seconds to get sync
@@ -283,6 +434,9 @@ void handleSerial()
 
     // process serial command
     switch(serialCmd) {
+      case 'a':
+        check_azel(2000, true);
+        break;
       case 'e':
         configManager.resetAllConfig();
         ESP.restart();
@@ -356,5 +510,6 @@ void printControls()
   Log::console(PSTR("e - erase board config and reset"));
   Log::console(PSTR("b - reboot the board"));
   Log::console(PSTR("p - send test packet to nearby stations (to check transmission)"));
+  Log::console(PSTR("a - azimuth and elevation selected satellite"));
   Log::console(PSTR("------------------------------------"));
 }
